@@ -70,15 +70,41 @@ jobs:
           echo ================================================================
           echo [3/6] 安装依赖 + 手动注入 CUDA 路径
           echo ================================================================
-          REM 手动注入 CUDA 12.8 路径（GitHub Runner 默认不加载）
-          set "CUDA_BIN=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin"
-          if not exist "%CUDA_BIN%\nvcc.exe" (
-            echo ⚠️ 默认路径未找到 nvcc，尝试搜索...
-            for /f "delims=" %%k in ('dir /b /s "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\*\bin\nvcc.exe" 2^>nul') do set "CUDA_BIN=%%~dpk"
+          REM 方法1：使用 CUDA_PATH 环境变量（GitHub Runner 已设置）
+          if defined CUDA_PATH (
+            set "CUDA_BIN=%CUDA_PATH%\bin"
+            echo 使用 CUDA_PATH: %CUDA_PATH%
+          ) else (
+            REM 方法2：遍历所有可能的 CUDA 版本
+            set "CUDA_BIN="
+            for /f "delims=" %%k in ('dir /b /s "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\*\bin\nvcc.exe" 2^>nul') do (
+              if not defined CUDA_BIN set "CUDA_BIN=%%~dpk"
+            )
+            REM 方法3：尝试常见版本路径
+            if not defined CUDA_BIN (
+              for %%v in (12.8 12.6 12.5 12.4 12.3 12.2 12.1 12.0) do (
+                if exist "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v%%v\bin\nvcc.exe" (
+                  set "CUDA_BIN=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v%%v\bin"
+                )
+              )
+            )
           )
-          set "PATH=%CUDA_BIN%;%PATH%"
+          
+          if not defined CUDA_BIN (
+            echo ❌ 无法找到 CUDA 安装路径
+            exit /b 1
+          )
+          
           echo CUDA bin 目录：%CUDA_BIN%
-
+          set "PATH=%CUDA_BIN%;%PATH%"
+          
+          REM 验证 nvcc 是否真的存在
+          if not exist "%CUDA_BIN%\nvcc.exe" (
+            echo ❌ %CUDA_BIN%\nvcc.exe 不存在！
+            dir "%CUDA_BIN%"
+            exit /b 1
+          )
+          
           choco install openssl ninja -y --no-progress
           where ninja || (echo ❌ ninja 未安装 && exit /b 1)
           where nvcc || (echo ❌ nvcc 仍未找到 && exit /b 1)
@@ -97,6 +123,7 @@ jobs:
           cmake -S . -B build -G "Ninja Multi-Config" ^
             -DCMAKE_C_COMPILER="%CL_PATH%" ^
             -DCMAKE_CXX_COMPILER="%CL_PATH%" ^
+            -DCMAKE_CUDA_COMPILER="%CUDA_BIN%\nvcc.exe" ^
             -DCMAKE_C_COMPILER_WORKS=ON ^
             -DCMAKE_CXX_COMPILER_WORKS=ON ^
             -DGGML_CUDA=ON ^
@@ -133,6 +160,7 @@ jobs:
           copy "%CUDA_PATH%\bin\cudart64_*.dll" out\
           copy "%CUDA_PATH%\bin\cublas64_*.dll" out\
           copy "%CUDA_PATH%\bin\cublasLt64_*.dll" out\
+          copy "C:\Windows\System32\vcr" out\
           copy "C:\Windows\System32\vcruntime140.dll" out\
           copy "C:\Windows\System32\vcruntime140_1.dll" out\
           copy "C:\Windows\System32\msvcp140.dll" out\
