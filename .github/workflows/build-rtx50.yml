@@ -1,0 +1,175 @@
+name: Build Ling-3.0-tiny Server for RTX 50 Series (Windows Native)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release 版本号（如 v1.0.0）'
+        required: true
+        default: 'v1.0.0'
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  build:
+    runs-on: windows-2022
+    permissions:
+      actions: write
+      contents: write
+
+    steps:
+      # 1. 拉取 aetherbird/llama.cpp 的 bailingmoe3-support 分支
+      - name: Checkout aetherbird/llama.cpp
+        uses: actions/checkout@v4
+        with:
+          repository: aetherbird/llama.cpp
+          ref: bailingmoe3-support
+          submodules: recursive
+
+      # 2. 【核心】在同一 cmd 会话里：加载 MSVC → 剔除 MinGW → 装依赖 → CMake → 编译
+      #    所有操作都在一个 shell 里完成，彻底避免跨 step 环境变量丢失
+      - name: Build llama-server (Windows + CUDA 12.8 + sm_120)
+        shell: cmd
+        run: |
+          echo ================================================================
+          echo [1/6] 加载 MSVC x64 环境（用 vswhere 动态定位，避免硬编码路径错误）
+          echo ================================================================
+          for /f "delims=" %%i in ('"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath') do set "VS_PATH=%%i"
+          set "VCVARS=%VS_PATH%\VC\Auxiliary\Build\vcvars64.bat"
+          if not exist "%VCVARS%" (
+            echo ❌ 致命错误：未找到 %VCVARS%
+            exit /b 1
+          )
+          call "%VCVARS%"
+          if %ERRORLEVEL% neq 0 (echo ❌ MSVC 环境加载失败 && exit /b 1)
+
+          REM 验证 cl.exe 已可用
+          where cl.exe || (echo ❌ cl.exe 未加载 && exit /b 1)
+          for /f "delims=" %%i in ('where cl.exe') do set "CL_PATH=%%i"
+          echo ✅ MSVC cl.exe: %CL_PATH%
+
+          echo ================================================================
+          echo [2/6] 从 PATH 中剔除预装 MinGW（GitHub Runner 自带，会干扰 CMake）
+          echo ================================================================
+          REM 把常见 MinGW 路径从 PATH 里移除（顺序无关，逐个替换）
+          set "PATH=%PATH:C:\mingw64\bin;=%"
+          set "PATH=%PATH:;C:\mingw64\bin=%"
+          set "PATH=%PATH:C:\mingw64\bin=%"
+          set "PATH=%PATH:C:\msys64\mingw64\bin;=%"
+          set "PATH=%PATH:;C:\msys64\mingw64\bin=%"
+          set "PATH=%PATH:C:\msys64\mingw64\bin=%"
+          set "PATH=%PATH:C:\msys64\ucrt64\bin;=%"
+          set "PATH=%PATH:;C:\msys64\ucrt64\bin=%"
+          set "PATH=%PATH:C:\msys64\ucrt64\bin=%"
+
+          REM 验证 MinGW 已被屏蔽
+          where cc.exe && (
+            echo ⚠️ cc.exe 仍在 PATH 中，尝试物理删除
+            for %%i in (cc.exe gcc.exe g++.exe) do (
+              for /f "delims=" %%j in ('where %%i 2^>nul') do (
+                echo 删除：%%j
+                del /f /q "%%j" || echo 删除失败（权限受限，继续）
+              )
+            )
+          ) || echo ✅ cc.exe 已在 PATH 中消失
+          where cc.exe && (echo ❌ cc.exe 仍存在 && exit /b 1) || echo ✅ MinGW 屏蔽成功
+
+          echo ================================================================
+          echo [3/6] 安装依赖（同会话，PATH 自动继承）
+          echo ================================================================
+          choco install openssl ninja -y --no-progress
+          where ninja || (echo ❌ ninja 未安装 && exit /b 1)
+          where nvcc || (echo ❌ nvcc 未找到 && exit /b 1)
+          nvcc --version
+          echo ✅ 依赖就绪
+
+          echo ================================================================
+          echo [4/6] 清理旧缓存
+          echo ================================================================
+          if exist build rmdir /s /q build
+          mkdir build
+
+          echo ================================================================
+          echo [5/6] CMake 配置（强制使用 MSVC，Blackwell sm_120）
+          echo ================================================================
+          cmake -S . -B build -G "Ninja Multi-Config" ^
+            -DCMAKE_C_COMPILER="%CL_PATH%" ^
+            -DCMAKE_CXX_COMPILER="%CL_PATH%" ^
+            -DCMAKE_C_COMPILER_WORKS=ON ^
+            -DCMAKE_CXX_COMPILER_WORKS=ON ^
+            -DGGML_CUDA=ON ^
+            -DCMAKE_CUDA_ARCHITECTURES="120" ^
+            -DGGML_CUDA_FA_ALL_QUANTS=ON ^
+            -DGGML_NATIVE=OFF ^
+            -DLLAMA_BUILD_SERVER=ON ^
+            -DLLAMA_BUILD_BORINGSSL=OFF ^
+            -DOPENSSL_USE_STATIC_LIBS=ON ^
+            -DOPENSSL_ROOT_DIR="C:\Program Files\OpenSSL-Win64" ^
+            -DCMAKE_C_FLAGS="/MT" ^
+            -DCMAKE_CXX_FLAGS="/MT" ^
+            -DCMAKE_VERBOSE_MAKEFILE=ON
+          if %ERRORLEVEL% neq 0 (echo ❌ CMake 配置失败 && exit /b 1)
+          echo ✅ CMake 配置完成
+
+          echo ================================================================
+          echo [6/6] 编译 llama-server
+          echo ================================================================
+          set /A NINJA_JOBS=%NUMBER_OF_PROCESSORS%-1
+          cmake --build build --config Release -j %NINJA_JOBS% -t llama-server
+          if %ERRORLEVEL% neq 0 (echo ❌ 编译失败 && exit /b 1)
+          echo 🎉🎉🎉 编译成功！
+
+      # 3. 收集产物
+      - name: Collect artifacts
+        shell: cmd
+        run: |
+          mkdir out
+          copy build\bin\Release\llama-server.exe out\
+          copy build\bin\Release\ggml*.dll out\
+          copy build\bin\Release\llama*.dll out\
+          copy build\bin\Release\mtmd.dll out\
+          copy "%CUDA_PATH%\bin\cudart64_*.dll" out\
+          copy "%CUDA_PATH%\bin\cublas64_*.dll" out\
+          copy "%CUDA_PATH%\bin\cublasLt64_*.dll" out\
+          copy "C:\Windows\System32\vcruntime140.dll" out\
+          copy "C:\Windows\System32\vcruntime140_1.dll" out\
+          copy "C:\Windows\System32\msvcp140.dll" out\
+          copy "C:\Windows\System32\msvcp140_1.dll" out\
+          copy "C:\Windows\System32\msvcp140_2.dll" out\
+          copy "C:\Windows\System32\concrt140.dll" out\
+          echo === 产物列表 ===
+          dir out\
+
+      # 4. 打包并发布 Release
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag_name }}
+          name: Ling-3.0-tiny Server ${{ inputs.tag_name }} — Windows Native RTX 50 Series
+          body: |
+            ## 🐦 Ling-3.0-tiny Windows 原生版（RTX 50 Series / Blackwell sm_120）
+            基于 [aetherbird/llama.cpp](https://github.com/aetherbird/llama.cpp/tree/bailingmoe3-support) 的 `bailingmoe3-support` 分支编译，原生支持 Ling-3.0-tiny 的 `bailingmoe3` 架构。
+
+            ### ✨ 核心特性
+            - **CUDA 12.8 + sm_120**：Blackwell 架构原生编译，适配全 RTX 50 系桌面显卡（5050/5060/5060Ti/5070/5080/5090）
+            - **Windows 原生**：无需 WSL，直接调用显卡驱动
+            - **开箱即用**：静态链接 OpenSSL + VC++ 运行库，内置 CUDA 12.8 运行库
+            - **MoE 优化**：启用 Flash Attention 全量化内核，提升 Ling-3.0-tiny 推理效率
+
+            ### 💻 显存适配参考
+            | 显存 | 适用显卡 | 推荐模型 |
+            |---|---|---|
+            | 8GB | RTX 5050/5060 | 7B-14B 量化模型 |
+            | 16GB | RTX 5060Ti/5070/5080 | 14B-32B 量化模型 |
+            | 32GB | RTX 5090 | 70B 以内量化模型 |
+
+            ### 🚀 快速使用
+            1. 下载 `ling30tiny-server-rtx50series-${{ inputs.tag_name }}.zip` 解压到纯英文目录
+            2. 放入 Ling-3.0-tiny GGUF 模型
+            3. PowerShell 运行：
