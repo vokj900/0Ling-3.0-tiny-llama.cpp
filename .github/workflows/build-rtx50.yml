@@ -32,32 +32,25 @@ jobs:
           ref: bailingmoe3-support
           submodules: recursive
 
-      # 2. 【核心】在同一 cmd 会话里：加载 MSVC → 剔除 MinGW → 装依赖 → CMake → 编译
-      #    所有操作都在一个 shell 里完成，彻底避免跨 step 环境变量丢失
+      # 2. 全流程编译（单会话避免环境变量丢失）
       - name: Build llama-server (Windows + CUDA 12.8 + sm_120)
         shell: cmd
         run: |
           echo ================================================================
-          echo [1/6] 加载 MSVC x64 环境（用 vswhere 动态定位，避免硬编码路径错误）
+          echo [1/6] 加载 MSVC x64 环境
           echo ================================================================
           for /f "delims=" %%i in ('"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath') do set "VS_PATH=%%i"
           set "VCVARS=%VS_PATH%\VC\Auxiliary\Build\vcvars64.bat"
-          if not exist "%VCVARS%" (
-            echo ❌ 致命错误：未找到 %VCVARS%
-            exit /b 1
-          )
+          if not exist "%VCVARS%" (echo ❌ 未找到 %VCVARS% && exit /b 1)
           call "%VCVARS%"
           if %ERRORLEVEL% neq 0 (echo ❌ MSVC 环境加载失败 && exit /b 1)
-
-          REM 验证 cl.exe 已可用
           where cl.exe || (echo ❌ cl.exe 未加载 && exit /b 1)
           for /f "delims=" %%i in ('where cl.exe') do set "CL_PATH=%%i"
           echo ✅ MSVC cl.exe: %CL_PATH%
 
           echo ================================================================
-          echo [2/6] 从 PATH 中剔除预装 MinGW（GitHub Runner 自带，会干扰 CMake）
+          echo [2/6] 从 PATH 中剔除预装 MinGW
           echo ================================================================
-          REM 把常见 MinGW 路径从 PATH 里移除（顺序无关，逐个替换）
           set "PATH=%PATH:C:\mingw64\bin;=%"
           set "PATH=%PATH:;C:\mingw64\bin=%"
           set "PATH=%PATH:C:\mingw64\bin=%"
@@ -67,25 +60,28 @@ jobs:
           set "PATH=%PATH:C:\msys64\ucrt64\bin;=%"
           set "PATH=%PATH:;C:\msys64\ucrt64\bin=%"
           set "PATH=%PATH:C:\msys64\ucrt64\bin=%"
-
-          REM 验证 MinGW 已被屏蔽
           where cc.exe && (
-            echo ⚠️ cc.exe 仍在 PATH 中，尝试物理删除
             for %%i in (cc.exe gcc.exe g++.exe) do (
-              for /f "delims=" %%j in ('where %%i 2^>nul') do (
-                echo 删除：%%j
-                del /f /q "%%j" || echo 删除失败（权限受限，继续）
-              )
+              for /f "delims=" %%j in ('where %%i 2^>nul') do del /f /q "%%j" || echo 删除 %%j 失败
             )
           ) || echo ✅ cc.exe 已在 PATH 中消失
           where cc.exe && (echo ❌ cc.exe 仍存在 && exit /b 1) || echo ✅ MinGW 屏蔽成功
 
           echo ================================================================
-          echo [3/6] 安装依赖（同会话，PATH 自动继承）
+          echo [3/6] 安装依赖 + 手动注入 CUDA 路径
           echo ================================================================
+          REM 手动注入 CUDA 12.8 路径（GitHub Runner 默认不加载）
+          set "CUDA_BIN=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8\bin"
+          if not exist "%CUDA_BIN%\nvcc.exe" (
+            echo ⚠️ 默认路径未找到 nvcc，尝试搜索...
+            for /f "delims=" %%k in ('dir /b /s "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\*\bin\nvcc.exe" 2^>nul') do set "CUDA_BIN=%%~dpk"
+          )
+          set "PATH=%CUDA_BIN%;%PATH%"
+          echo CUDA bin 目录：%CUDA_BIN%
+
           choco install openssl ninja -y --no-progress
           where ninja || (echo ❌ ninja 未安装 && exit /b 1)
-          where nvcc || (echo ❌ nvcc 未找到 && exit /b 1)
+          where nvcc || (echo ❌ nvcc 仍未找到 && exit /b 1)
           nvcc --version
           echo ✅ 依赖就绪
 
@@ -110,7 +106,7 @@ jobs:
             -DLLAMA_BUILD_SERVER=ON ^
             -DLLAMA_BUILD_BORINGSSL=OFF ^
             -DOPENSSL_USE_STATIC_LIBS=ON ^
-            -DOPENSSL_ROOT_DIR="C:\Program Files\OpenSSL-Win64" ^
+            -DOPENSSL_ROOT_DIR="C:\Program Files\OpenSSL" ^
             -DCMAKE_C_FLAGS="/MT" ^
             -DCMAKE_CXX_FLAGS="/MT" ^
             -DCMAKE_VERBOSE_MAKEFILE=ON
