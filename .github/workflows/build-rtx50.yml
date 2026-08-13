@@ -24,6 +24,14 @@ jobs:
       contents: write
 
     steps:
+      # 0. 安装 CUDA Toolkit 12.8.1（关键修复：Runner 默认没装）
+      - name: Install CUDA Toolkit 12.8.1
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: '12.8.1'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev"]'
+
       # 1. 拉取 aetherbird/llama.cpp 的 bailingmoe3-support 分支
       - name: Checkout aetherbird/llama.cpp
         uses: actions/checkout@v4
@@ -68,43 +76,19 @@ jobs:
           where cc.exe && (echo ❌ cc.exe 仍存在 && exit /b 1) || echo ✅ MinGW 屏蔽成功
 
           echo ================================================================
-          echo [3/6] 安装依赖 + 手动注入 CUDA 路径
+          echo [3/6] 安装依赖 + 使用已安装的 CUDA
           echo ================================================================
-          REM 方法1：使用 CUDA_PATH 环境变量（GitHub Runner 已设置）
-          if defined CUDA_PATH (
-            set "CUDA_BIN=%CUDA_PATH%\bin"
-            echo 使用 CUDA_PATH: %CUDA_PATH%
-          ) else (
-            REM 方法2：遍历所有可能的 CUDA 版本
-            set "CUDA_BIN="
-            for /f "delims=" %%k in ('dir /b /s "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\*\bin\nvcc.exe" 2^>nul') do (
-              if not defined CUDA_BIN set "CUDA_BIN=%%~dpk"
-            )
-            REM 方法3：尝试常见版本路径
-            if not defined CUDA_BIN (
-              for %%v in (12.8 12.6 12.5 12.4 12.3 12.2 12.1 12.0) do (
-                if exist "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v%%v\bin\nvcc.exe" (
-                  set "CUDA_BIN=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v%%v\bin"
-                )
-              )
-            )
-          )
-          
-          if not defined CUDA_BIN (
-            echo ❌ 无法找到 CUDA 安装路径
-            exit /b 1
-          )
-          
-          echo CUDA bin 目录：%CUDA_BIN%
-          set "PATH=%CUDA_BIN%;%PATH%"
-          
-          REM 验证 nvcc 是否真的存在
+          REM CUDA 已由 Jimver/cuda-toolkit Action 安装，CUDA_PATH 已自动设置
+          echo CUDA_PATH: %CUDA_PATH%
+          set "CUDA_BIN=%CUDA_PATH%\bin"
           if not exist "%CUDA_BIN%\nvcc.exe" (
             echo ❌ %CUDA_BIN%\nvcc.exe 不存在！
             dir "%CUDA_BIN%"
             exit /b 1
           )
-          
+          echo CUDA bin 目录：%CUDA_BIN%
+          set "PATH=%CUDA_BIN%;%PATH%"
+
           choco install openssl ninja -y --no-progress
           where ninja || (echo ❌ ninja 未安装 && exit /b 1)
           where nvcc || (echo ❌ nvcc 仍未找到 && exit /b 1)
@@ -160,7 +144,6 @@ jobs:
           copy "%CUDA_PATH%\bin\cudart64_*.dll" out\
           copy "%CUDA_PATH%\bin\cublas64_*.dll" out\
           copy "%CUDA_PATH%\bin\cublasLt64_*.dll" out\
-          copy "C:\Windows\System32\vcr" out\
           copy "C:\Windows\System32\vcruntime140.dll" out\
           copy "C:\Windows\System32\vcruntime140_1.dll" out\
           copy "C:\Windows\System32\msvcp140.dll" out\
